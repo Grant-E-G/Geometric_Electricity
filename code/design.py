@@ -2108,8 +2108,9 @@ def budget(parts: list[dict[str, Any]]) -> dict[str, Any]:
         "200_inductors": round(200 * 0.09380, 2),
         "800_capacitors": round(800 * 0.0062, 2),
         "resistors_headers_spares": 5.0,
-        "pcb_order_and_stencil_allowance": 70.0,
-        "combined_shipping_allowance": 35.0,
+        "pcbway_hasl_boards_including_shipping": 72.76,
+        "stencil_quote": 10.0,
+        "component_shipping_allowance": 15.0,
         "consumables_allowance": 15.0,
         "tax_import_allowance": 20.0,
         "contingency": 20.0,
@@ -2126,6 +2127,15 @@ def budget(parts: list[dict[str, Any]]) -> dict[str, Any]:
         "planned_total": total,
         "remaining_to_limit": round(200 - total, 2),
         "landed_quotes_confirmed": False,
+        "fabrication_quote": {
+            "source": "User-provided PCBWay quote",
+            "pcb_shipping_included": True,
+            "lead_free_hasl_usd": 72.76,
+            "enig_usd": 97.23,
+            "stencil_usd": 10.0,
+            "extra_stencil_shipping_confirmed": False,
+        },
+        "enig_total_with_current_bom_usd": round(total + 97.23 - 72.76, 2),
         "purchase_release": False,
         "price_check_date": "2026-10-05",
         "price_sources": {
@@ -2140,6 +2150,9 @@ def budget(parts: list[dict[str, Any]]) -> dict[str, Any]:
             "unit_usd": 0.0381,
             "inductor_total_usd": 7.62,
             "proposed_total_usd": round(total - allocation["200_inductors"] + 7.62, 2),
+            "enig_proposed_total_usd": round(
+                total - allocation["200_inductors"] + 7.62 + 97.23 - 72.76, 2
+            ),
             "part_savings_vs_original_allocation_usd": 16.58,
             "L_tolerance": 0.05,
             "Q_min_at_10mhz": 45,

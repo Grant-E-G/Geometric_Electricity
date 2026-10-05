@@ -184,4 +184,5 @@ updates the ground-contact map and opens selected standard ground vias on the
 front solder mask.
 Import refills the ground plane. A successful router import is not a passing
 DRC or permission to fabricate. Current manufacturing output is explicitly a
-preview, and the budget's fabrication/shipping figures remain quote allowances.
+preview. The budget uses user-provided PCBWay fabrication/shipping and stencil
+quotes; component shipping, consumables, tax/import and contingency remain allowances.

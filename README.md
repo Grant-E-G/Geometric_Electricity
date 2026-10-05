@@ -30,11 +30,12 @@ The hardware is a design draft. Generated manufacturing files remain previews un
 6. Measure low-order responses and pulses, fit overlapping modes where justified,
    and state partial-spectrum limits explicitly.
 
-All generated reports/previews stay in ignored `build/`. The refreshed spending
-allocation is $188.72 with contingency. A recommended TDK inductor alternate
-reduces the proposed allocation to $177.58 and improves tolerance; its purchasing
-and assembly qualification are recorded in the design plan. Fabrication and
-shipping are allowances, not confirmed quotes. No purchasing or physical
+All generated reports/previews stay in ignored `build/`. With the user-provided
+PCBWay shipping-inclusive quote and $10 stencil, the proposed TDK parts give
+$170.34 for lead-free HASL or $194.81 for ENIG. These totals retain $15 component
+shipping, $20 tax/import and $20 contingency allowances. Component delivery and
+any additional stencil shipping remain unconfirmed. The current Abracon BOM
+costs $181.48 with HASL; its ENIG scenario exceeds $200. No purchasing or physical
 measurements have occurred.
 
 ## Coding Guidelines

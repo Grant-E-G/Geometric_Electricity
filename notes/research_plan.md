@@ -224,10 +224,10 @@ corresponding to the same constant series resistance as Q=45 at 10 MHz.
 Use standard KiCad 0805/0603 footprints, front-side assembly and one stencil.
 Headers are installed afterward by hand. No custom inductor footprint is needed.
 
-The following is a spending allocation, **not a fabrication quote**. Supplier
+The following combines the user-provided PCBWay quote with remaining allowances. Supplier
 component listings were checked 2026-10-05; stock/prices can change. The board is
-150×130 mm, outside common 100×100 promotional pricing. Obtain a quote at the
-actual outline, 2 layers, ordinary FR-4, 1 oz copper and standard finish. Populate
+150×130 mm, outside common 100×100 promotional pricing. The user quotes $72.76 for lead-free HASL or $97.23 for ENIG, including
+PCB shipping, plus $10 for a stencil. Populate
 one board; budget any mandatory minimum bare-board order in the fabrication row.
 
 | Item | Buy quantity / allowance | USD |
@@ -235,12 +235,13 @@ one board; budget any mandatory minimum bare-board order in the fabrication row.
 | Abracon inductors, cut tape (170 used + 30 spare) | 200 × $0.09380 | 18.76 |
 | Yageo capacitors (687 used; spare/defect stock included) | 800 × $0.0062 | 4.96 |
 | 1 kΩ 1% 0603 resistors and two 1×02 headers, with spares | allowance | 5.00 |
-| Bare PCBs and one front stencil | maximum allocation | 70.00 |
-| All supplier shipping combined | maximum allocation | 35.00 |
+| PCBWay bare PCBs, lead-free HASL, including shipping | user quote | 72.76 |
+| Front stencil | user quote | 10.00 |
+| Component-order shipping | provisional allowance | 15.00 |
 | Paste, hookup wire, probe ground adapters, consumables | allowance | 15.00 |
 | Tax/import charges | allowance | 20.00 |
 | Contingency | reserve | 20.00 |
-| **Planned ceiling** | **$11.28 below the hard limit** | **188.72** |
+| **Planned ceiling** | **$18.52 below the hard limit** | **181.48** |
 
 Component sources: [DigiKey US cut-tape listing](https://www.digikey.com/en/products/detail/abracon-llc/AIML-0805-1R0K-T/2662996),
 [LCSC capacitor listing](https://www.lcsc.com/product-detail/Multilayer-Ceramic-Capacitors-MLCC-SMD-SMT_YAGEO-CC0603JRNPO9BN331_C62784.html),
@@ -257,8 +258,12 @@ The preferred alternate is **TDK MLF2012A1R0JT000**, LCSC **C165812**:
 1 µH ±5%, Q minimum 45 at 10 MHz and SRF minimum 120 MHz. The checked
 200-piece tier is $0.0381 each, **$7.62 total**, versus $18.76 for Abracon.
 Together with repricing the unchanged Yageo capacitors to $4.96, this saves
-**$16.58 versus the original $194.16 allocation**. Keeping every other
-allowance and reserve unchanged gives **$177.58**, leaving $22.42 below $200.
+**$16.58 versus the original $194.16 allocation**. Using the PCBWay quotes and retaining $15 for component shipping gives
+**$170.34 with HASL** or **$194.81 with ENIG**, leaving $29.66 or $5.19
+below $200. Both include the stencil, $15 consumables, $20 tax/import and $20
+contingency. Component shipping is an allowance; extra stencil shipping and
+quote tax treatment remain unconfirmed. The current Abracon BOM is $181.48
+with HASL or $205.95 with ENIG. Finish remains a purchasing choice.
 The suite includes the exact ±5% L/±5% C and 120 MHz SRF cases.
 
 Sources: [TDK specifications](https://product.tdk.com/en/search/inductor/inductor/smd/info?part_no=MLF2012A1R0JT000),
@@ -473,3 +478,87 @@ bound. A fabricated prototype does not by itself validate the scientific claims.
 - [DE-5000 manual](https://www.ietlabs.com/pdf/Manuals/DE_5000_im.pdf).
 - [Rigol programming guide](https://download.rigol.com/en/Manual/Digital%20Oscilloscope/DHO900/DHO800900_ProgrammingGuide_EN.pdf).
 - [JDS6600 supplier specifications](https://www.joy-it.net/en/products/JT-JDS6600).
+
+## Blind-spot audit: scope, cost and geometric distinctness
+
+Audit date: 2026-10-05. This is a scope analysis, not a CAD revision or a
+purchasing release. Additional ideal-graph calculations use the exported graph
+construction, direct symmetric eigendecomposition and the action of a one-step
+sixfold/sevenfold rotation on each eigenspace.
+
+The original outline chose 85 nodes per graph and many outputs; those are scope
+choices, not requirements established by a minimum-size or statistical-power
+study. At the proposed TDK/Yageo tiers, the 170 inductors and 687 capacitors
+actually populated cost $10.73. The buying allowance is $12.58 for those parts,
+plus $5 for interfaces/spares. The earlier $160 fabrication/shipping/other
+allocation is superseded by the PCBWay quote scenarios above. Quotes and
+remaining allowances are not actual invoices. Saving pennies per passive cannot address most of the budget.
+Full node access costs board space, routing effort and manual acquisition time,
+although copper test pads do not require separate purchased components.
+
+| Assumption to relax | Consequence and limit |
+|---|---|
+| Every listed mathematical output must succeed in V1 | Make a normalized low-mode spectrum and a few spatial maps the acceptance target. Heat/zeta are derived from the same data, not independent confirmations; retain incomplete-spectrum labels. |
+| Both graphs must have 85 nodes | Test smaller candidates before layout. A 37-node Euclidean disk uses 90 edges + 42 boundary capacitors; a 29-node hyperbolic radius-two disk uses 63 + 77. Together: 66 L and 272 C, versus 170 L and 687 C. Ideal ordering remains distinct, but boundary/continuum fidelity and loaded noisy recovery are not qualified. |
+| Equal node counts constitute matched geometry | Equal N does not match radius or boundary fraction. A 37-node E / 85-node H comparison matches three graph-distance shells; it is another legitimate experiment, not an equivalent control. |
+| One 150×130 mm outline is necessary | Investigate tighter placement or panel arrangements and obtain real landed quotes. A 100×100 outline has 49% less area, but fit, ground access and routing are unproven; promotional savings cannot be assumed. |
+| One capacitor per missing neighbor is necessary | Only the total shunt capacitance matters ideally. Replace 269 boundary capacitors with 86 equivalent-value banks if C0G sourcing, tolerance and RF parasitics qualify. This removes 183 placements; cheap baseline capacitors make dollar savings small. |
+| Every frequency/source needs a complete spatial map | Use center/off-center discovery sweeps and selected shell/node maps first. Four-source full coverage is useful for degeneracies, but two-node discovery is not full mode recovery. |
+| Absolute frequencies are the main geometry test | Use eigenvalue ratios and spatial symmetry to remove a common LC scale error. Individual disorder, boundary changes and RF loading still require calibration. |
+
+Do not relax C0G behavior, qualified RF loss, correct boundary operator,
+source-current calibration, or multiple-source access merely to save small sums.
+The current ±5% inductor alternate already improves tolerance while reducing
+cost. A no-VNA workflow is viable but transfers effort into fixture qualification,
+channel calibration and probe deembedding. Four sources × 85 nodes × two graphs
+means 680 source/node combinations for a complete response map, before diagonal
+calibration, drift checks or repeats; frequency sweeps may be automated while
+probe movement remains manual. Physical acquisition time is a hidden constraint.
+
+The two current networks are topologically disks, both triangulated and simply
+connected. The difference is geometric/connectivity curvature, not different
+genus or a topological phase. In the bulk, six equal triangles meet at an E node
+and seven at an H node. The q=6/7 choice also changes local electrical loading;
+raw peak separation alone cannot attribute an effect uniquely to curvature.
+
+| Ideal-graph measure | E85 | H85 |
+|---|---:|---:|
+| Boundary nodes | 30/85 (35.3%) | 56/85 (65.9%) |
+| Graph-distance shells | 1,6,12,18,24,24 | 1,7,21,56 |
+| Mean retained degree | 5.224 | 4.612 |
+| First angular-sector eigenvalue / ground eigenvalue | 2.485 | 1.552 |
+| First threefold-sector eigenvalue / ground eigenvalue | 6.380 | 2.357 |
+| Second rotation-invariant eigenvalue / ground eigenvalue | 4.968 | 2.957 |
+
+Thus the second rotation-invariant mode lies below the first threefold-sector
+mode in E, but above it in H. Electrical frequency runs in the reverse order.
+These are exact finite-graph rotational sectors; angular labels are defined
+modulo six/seven and do not independently prove continuum radial labels. This
+scale-independent ordering is a stronger primary target than the roughly
+15.65 versus 7.66 MHz highest resonance. The 37-node E and 29-node H candidates
+retain the corresponding ideal ordering (4.648 < 5.649 in E; 3.135 > 2.827 in H).
+They are interesting small demonstrations, not validated replacement designs.
+
+Boundary leverage is substantial: uniformly multiplying termination C by 0.9
+or 1.1 changes the ideal lowest eigenvalue by -3.6%/+3.1% in E and -4.2%/+3.6%
+in H. The first angular/ground ratio changes only about 0.2% in E but about
+1.2% in H. This symmetric stress case is not random tolerance or a complete
+boundary robustness study. A larger H disk still has a substantial boundary;
+do not assume that adding nodes automatically yields a bulk-only experiment.
+
+The Euclidean graph is an essential benchmark for the apparatus and analysis;
+its isolated scientific novelty is modest. H adds stronger growth, boundary
+leverage and changed angular/radial ordering, but needs more careful finite-size
+interpretation. The pair is most valuable as a controlled measurement exercise.
+The basic hyperbolic-drum mode reordering and geodesic propagation have already
+been experimentally demonstrated in [Lenggenhager et al., 2022](https://www.nature.com/articles/s41467-022-32042-4).
+A credible improvement here would be a transparent inexpensive measurement,
+uncertainty/boundary study, or stronger quantified reconstruction—not merely
+repeating known geometry with additional postprocessed functions.
+
+Before committing a smaller design, compare a prespecified normalized ordering
+and symmetry observable against noise/disorder, boundary changes and size changes.
+For propagation, compare hyperbolic versus Euclidean/graph-distance explanatory
+models on held-out nodes/time windows rather than fitting only the metric assumed
+by construction. Existing simulations mostly validate implementation and
+sensitivity; they do not yet constitute this competing-hypothesis test.
