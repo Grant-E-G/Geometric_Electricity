@@ -7,3 +7,11 @@ __pycache__/
 node_modules/
 dist/
 build/
+
+# KiCad local UI state and recovery files
+*.kicad_prl
+*.lck
+*.bak
+~*.kicad_sch.lck
+~*.kicad_pcb.lck
+*-backups/

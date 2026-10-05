@@ -1,6 +1,10 @@
-# Theory Project Template
+# Geometric Electricity
 
-Template repository for pure math and theory-heavy research projects.
+A passive LC circuit experiment comparing 85-node Euclidean and hyperbolic disks.
+
+The [project outline](notes/one_and_done_hyperbolic_euclidean_board.md) describes the intended board. The [design and measurement plan](notes/research_plan.md) records calculations, equipment, decisions and remaining validation. Open [the KiCad project](hardware/geometric_electricity.kicad_pro) for the current CAD draft; [reproduction commands](code/README.md) generate simulations and verify connectivity.
+
+The hardware is a design draft. Generated manufacturing files remain previews until routing, procurement and assembly checks pass. Bench validation follows assembly.
 
 ## Repository Layout
 
@@ -8,27 +12,27 @@ Template repository for pure math and theory-heavy research projects.
 - `math/`: definitions, theorem targets, proof sketches, examples, and open questions.
 - `latex/`: manuscript source, macros, bibliography, and TeX inputs.
 - `latex/render/`: rendered PDFs and TeX build products. This directory is ignored by git.
-- `code/`: optional computational checks, symbolic experiments, and figure-generation scripts.
+- `code/`: one consolidated simulation, CAD-generation and measurement-analysis script.
+- `hardware/`: one KiCad project, sparse adjacency/metric data, BOM.
+- `build/`: ignored simulation reports, figures, native checks and manufacturing previews.
 - `sources/`: source material used during research.
 - `sources/pdfs/`: local PDF references. PDF files are ignored by git.
 
-## Suggested Workflow
+## Working Sequence
 
-1. Start by editing `notes/research_plan.md`.
-2. Extract stable definitions, claims, and proof obligations into `math/`.
-3. Promote mature material from `math/` into `latex/`.
-4. Put references and reading notes under `sources/` and `notes/`.
-5. Use `code/` only when computation helps check an example, verify algebra, generate figures, or support reproducibility.
+1. Read the design/measurement plan and the original outline.
+2. Reproduce simulations, probe loading, tolerance and defect sweeps.
+3. Generate the KiCad schematic and placement; route and run native checks.
+4. Confirm a landed total **below $200**, including PCB/stencil, shipping, tax,
+   consumables and spares. Component precision must not break this constraint.
+5. Verify the stencil/assembly map, assemble with a measured reflow profile and
+   calibrate the RF fixture and probes.
+6. Measure low-order responses and pulses, fit overlapping modes where justified,
+   and state partial-spectrum limits explicitly.
 
-## Theory-First Convention
-
-The central path is:
-
-```text
-notes/research_plan.md -> math/ -> latex/
-```
-
-Code is optional and should remain subordinate to the mathematical argument unless the project explicitly becomes computational.
+All generated reports/previews stay in ignored `build/`. The current spending
+allocation is $194.16 with contingency; fabrication and shipping are allowances,
+not confirmed quotes. No purchasing or physical measurements have occurred.
 
 ## Coding Guidelines
 
