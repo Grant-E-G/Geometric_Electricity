@@ -155,6 +155,58 @@ A second ngspice transient includes a 50 Ω generator, 1 kΩ injection resistanc
 and source/scan probe capacitance. Synthetic waveforms are predictions, not
 measurements of the JDS6600's pulse or a fabricated board.
 
+## Extended testing simulations
+
+Run `.venv/bin/python code/design.py test-simulations --trials 200`. This
+regenerates the original simulations and independent ngspice references before
+running the additional tests; it preserves the routed CAD. Results and plots
+are in `build/test_simulations.json` and `build/test_simulations.png`. Generated
+artifacts stay ignored; the implementation stays in the existing design script.
+
+The suite covers source visibility, moving-probe deembedding, assumed measurement
+noise and calibration errors, component/lot tolerance and localization, coil
+self-capacitance, capacitor ESR/ESL, trace/ground inductance, mutual inductance,
+assembly faults, loaded pulses, full-network overlapping-pole recovery, and
+partial heat/zeta/Green reconstruction. The nonideal circuit is independently
+cross-checked against ngspice; matrix heat/Green calculations are checked against
+independent matrix exponential/inverse calculations. Checks include passivity
+and source/probe loading, with 10 pF per actively probed node.
+
+Important numerical findings from the seeded 200-trial run:
+
+- Four selected sources span the first six ideal mode clusters for both graphs.
+  A center source alone misses symmetry modes. Rank does not establish practical
+  signal-to-noise or identifiability of the complete spectrum.
+- The fifth-percentile minimum overlap of the first six mode subspaces is about
+  0.82/0.83 (E/H) for ±10% L, ±5% C; ±5% L improves this to 0.95/0.96.
+  ±20% L with ±5% C drops it to 0.60/0.45. These are normalized self-adjoint
+  subspaces, with independently sampled boundary capacitors; they differ from
+  the earlier conservative, correlated-bank tolerance calculation above.
+- Exact simulated moving-probe deembedding recovers the intrinsic maps to
+  numerical precision. Assumed 0.5% gain error, 0.5 degree phase error and
+  2 pF probe-capacitance uncertainty give roughly 2–3% map error through much
+  of the resonant band. Noise trials assume independent white sample noise,
+  20 cycles at 1 GS/s and 200 mVpp generator output. These assumptions are
+  sensitivity cases, not measured Rigol noise specifications.
+- Loaded-pulse state-space and ngspice results agree within 0.1% of peak.
+  Repeating a scan with the probe moved changes the reconstructed wave map by
+  about 1.3% relative to a fixed-probe reference. Threshold arrivals and
+  voltage-weighted metric radii are diagnostics, not causal propagation speeds
+  or proof of unreflected geodesic transport.
+- Full-network fits use multiple sources, held-out frequencies and two seeds.
+  Q=36 supports useful selected overlapping-mode recovery at low added noise;
+  Q=20 produces substantially worse spatial recovery even with very small fit
+  residuals. Convergence and a small residual alone do not qualify eigenpairs.
+- With only 12 modes, the dimensionless t=1 heat trace captures about 90% for
+  both graphs, but zeta(s=1) captures only 47%/31% (E/H). The corresponding
+  Green inverse has about 34%/65% relative Frobenius error. Report partial
+  quantities and tested tail bounds rather than claiming complete spectra.
+
+Parasitic values and mutual couplings are illustrative stress cases, not PCB
+field extraction or manufacturer broadband models. Specified Q at 10 MHz and
+SRF do not determine the actual inductance/loss curve. Real fixture, RF component
+qualification and channel calibration remain necessary with the owned equipment.
+
 ## Parts decision and assembly
 
 The budget is a hard **under $200 USD all-in** limit for one populated board,
@@ -181,14 +233,14 @@ one board; budget any mandatory minimum bare-board order in the fabrication row.
 | Item | Buy quantity / allowance | USD |
 |---|---:|---:|
 | Abracon inductors, cut tape (170 used + 30 spare) | 200 × $0.09380 | 18.76 |
-| Yageo capacitors (687 used; spare/defect stock included) | 800 × $0.013 | 10.40 |
+| Yageo capacitors (687 used; spare/defect stock included) | 800 × $0.0062 | 4.96 |
 | 1 kΩ 1% 0603 resistors and two 1×02 headers, with spares | allowance | 5.00 |
 | Bare PCBs and one front stencil | maximum allocation | 70.00 |
 | All supplier shipping combined | maximum allocation | 35.00 |
 | Paste, hookup wire, probe ground adapters, consumables | allowance | 15.00 |
 | Tax/import charges | allowance | 20.00 |
 | Contingency | reserve | 20.00 |
-| **Planned ceiling** | **$5.84 below the hard limit** | **194.16** |
+| **Planned ceiling** | **$11.28 below the hard limit** | **188.72** |
 
 Component sources: [DigiKey US cut-tape listing](https://www.digikey.com/en/products/detail/abracon-llc/AIML-0805-1R0K-T/2662996),
 [LCSC capacitor listing](https://www.lcsc.com/product-detail/Multilayer-Ceramic-Capacitors-MLCC-SMD-SMT_YAGEO-CC0603JRNPO9BN331_C62784.html),
@@ -198,6 +250,46 @@ PCB price as the landed cost. If actual invoices exceed an allocation, use the
 contingency only while keeping the total strictly below $200. If the total still
 exceeds the ceiling, the design fails its cost acceptance gate; revise suppliers,
 stencil choice or board size before ordering. No order has been placed.
+
+### Cheaper purchasing candidates
+
+The preferred alternate is **TDK MLF2012A1R0JT000**, LCSC **C165812**:
+1 µH ±5%, Q minimum 45 at 10 MHz and SRF minimum 120 MHz. The checked
+200-piece tier is $0.0381 each, **$7.62 total**, versus $18.76 for Abracon.
+Together with repricing the unchanged Yageo capacitors to $4.96, this saves
+**$16.58 versus the original $194.16 allocation**. Keeping every other
+allowance and reserve unchanged gives **$177.58**, leaving $22.42 below $200.
+The suite includes the exact ±5% L/±5% C and 120 MHz SRF cases.
+
+Sources: [TDK specifications](https://product.tdk.com/en/search/inductor/inductor/smd/info?part_no=MLF2012A1R0JT000),
+[LCSC TDK stock/price](https://www.lcsc.com/fr/product-detail/C165812.html), and
+[LCSC Yageo price](https://www.lcsc.com/product-detail/C62784.html).
+Prices were checked 2026-10-05; confirm stock and the combined landed quote.
+
+| Candidate | Actual buy-quantity cost | Assessment |
+|---|---:|---|
+| TDK MLF2012A1R0JT000, 200 | $7.62 | Preferred; tighter tolerance and adequate specified Q/SRF |
+| FH CMI201209U1R0KT, 200 | $5.06 | Saves only $2.56 more; Q minimum 35 at 10 MHz and SRF 75 MHz; lower-Q stress case included |
+| FH CMP201209UD1R0MT, 200 | $6.62 | Only $1 cheaper than TDK, ±20% and unqualified RF Q; reject |
+| TDK MLF2012A1R0JTD25 / TAI-TECH FCI2012F-1R0K | — | Checked listings out of stock; exclude from a purchasable budget |
+| Walsin HH18N331J500CT | — | Cheaper C0G listing out of stock; exclude |
+| CCTC TCC0603COG331J500CT, 800 | $5.60 | Costs more than the unchanged Yageo part |
+
+Other checked listings: [FH RF inductor](https://www.lcsc.com/product-detail/C99367.html),
+[FH 20% part](https://www.lcsc.com/product-detail/C401475.html),
+[out-of-stock TDK variant](https://www.lcsc.com/product-detail/C404436.html),
+[Walsin capacitor](https://www.lcsc.com/pl/product-detail/C3842704.html), and
+[CCTC capacitor](https://www.lcsc.com/de/product-detail/C376783.html).
+
+The CAD and BOM still name Abracon: this identifies an alternate rather than
+silently approving a purchasing or fabrication release. TDK's 0805 body fits
+its envelope, but its recommended land pattern has a 1.0 mm inner pad gap
+versus 1.25 mm in the existing standard KiCad footprint (both 1.2 mm pad width).
+Review the terminal overlap and reflow a sample before releasing the alternate;
+use the manufacturer's recommended pattern if qualification requires a change.
+Its 0.30 Ω maximum DCR must not be substituted for MHz series resistance.
+Do not trade C0G for a voltage-dependent dielectric or choose generic power
+inductors with unspecified RF Q just to save another dollar.
 
 Bourns CM453232-1R0JL (5%, Q≥50 at 7.96 MHz, 1812) remains a simulation
 comparison, not an alternate that fits the present footprint. Its current
@@ -305,8 +397,11 @@ long clip leads require separate fixture characterization.
    fitting. Full 85-mode reconstruction is an additional identifiability/noise
    problem, not a promised consequence of 85 accessible pads. The `fit` command
    estimates common conjugate pole pairs and residues by variable projection.
-   It has recovered a noisy synthetic overlapping pair; it has not been validated
-   against this equipment or a fabricated board. Moving-probe deembedding and
+   It has recovered synthetic overlapping modes from the full 85-node networks,
+   with held-out frequencies and multiple initial seeds. Its complex local
+   polynomial background approximates nearby modes over the fitted window; it
+   is not a global passive circuit model. It remains unvalidated against this
+   equipment or a fabricated board. Moving-probe deembedding and
    channel calibration are prerequisites. Inspect fit residuals, conditioning,
    multiple seed sets and held-out frequencies before using fitted eigenpairs.
 7. Repeat identical pulse injections at a boundary node and capture every node

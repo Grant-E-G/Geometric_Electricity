@@ -30,9 +30,12 @@ The hardware is a design draft. Generated manufacturing files remain previews un
 6. Measure low-order responses and pulses, fit overlapping modes where justified,
    and state partial-spectrum limits explicitly.
 
-All generated reports/previews stay in ignored `build/`. The current spending
-allocation is $194.16 with contingency; fabrication and shipping are allowances,
-not confirmed quotes. No purchasing or physical measurements have occurred.
+All generated reports/previews stay in ignored `build/`. The refreshed spending
+allocation is $188.72 with contingency. A recommended TDK inductor alternate
+reduces the proposed allocation to $177.58 and improves tolerance; its purchasing
+and assembly qualification are recorded in the design plan. Fabrication and
+shipping are allowances, not confirmed quotes. No purchasing or physical
+measurements have occurred.
 
 ## Coding Guidelines
 

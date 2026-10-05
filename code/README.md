@@ -26,6 +26,24 @@ independently reconstructed graphs without overwriting the copper.
 models without regenerating the KiCad files. All intermediate files, plots,
 ngspice decks and manufacturing previews are in ignored `build/`.
 
+Run the complete computational measurement suite, including the original
+simulations and fresh independent ngspice references:
+
+```bash
+.venv/bin/python code/design.py test-simulations --trials 200
+```
+
+This preserves the routed PCB and schematic. It adds source-rank/visibility,
+inductor SRF and loss, capacitor ESR/ESL and trace/return inductance, signed mutual
+coupling, uneven stray capacitance, noisy current reconstruction and scan-probe
+deembedding, extended disorder/localization, common-pole/spatial-residue recovery,
+held-out frequencies, assembly faults, moving-probe pulses and finite-spectrum
+truncation tests. Noise, calibration errors and parasitic values are explicit
+sensitivity assumptions; they are not measurements or field-extracted PCB data.
+Failed recovery scenarios remain in the report rather than being counted as
+numerical failures or hidden. A small fit residual alone does not establish
+correct poles or spatial modes.
+
 Generated outputs include:
 
 - `simulation.json` and `simulation.png`: seed, Monte Carlo scenarios, frequency
@@ -35,6 +53,14 @@ Generated outputs include:
 - `E/H_loaded_pulse.npz`: Gaussian voltage pulse, 50 Ω generator, 1 kΩ injection,
   and two 10 pF probes, simulated independently in ngspice.
 - `spice_validation.json`: independent matrix/modal-versus-ngspice errors.
+- `test_simulations.json` / `test_simulations.png`: computational measurement
+  coverage, parameters, failures and engineering limits for both geometries.
+- `E/H_nonideal_ac.npz` and `E/H_nonideal_spice.cir`: nonideal sweeps and separately
+  stamped ngspice models, including mutual coupling.
+- `E/H_pulse_tests.npz`: complete repeated 85-node scans with a moving probe,
+  alongside one acquisition with the scan probe held fixed.
+- `E/H_recovery_input.npz` / `E/H_recovery_fit.npz`: the last recovery case;
+  all noise levels and seed comparisons are retained in `test_simulations.json`.
 - `verification.json`, `erc.json`, `drc.json`: graph/pin and native rule checks.
 - `budget.json`: component quantities, spending allocations and unconfirmed quote gates.
 - `probe_map.pdf` / `probe_map.csv`: actual signal-pad coordinates, KiCad reference
@@ -82,14 +108,21 @@ first; a moving load does not have exact common poles. Seed distinct resonance
 clusters from a coarse sweep (one pole pair per degenerate cluster):
 
 ```bash
-.venv/bin/python code/design.py fit --responses build/responses.npz --initial-mhz 4.42 4.63 --output build/poles.npz
+.venv/bin/python code/design.py fit --responses build/responses.npz --initial-mhz 4.42 4.63 --background-order 2 --output build/poles.npz
 ```
 
-Variable projection fits real-impulse-response conjugate pole pairs with complex
-residues and a smooth background. Output includes damping, undamped frequencies,
+Variable projection fits conjugate pole pairs with complex residues and a local
+complex polynomial background on the positive-frequency window. The polynomial
+approximates other modes locally; it is not a global passive network model.
+Orders 0–4 are supported; compare orders and adjacent-mode counts to detect
+model bias. Output includes damping, undamped frequencies,
 residues, residual RMS and Jacobian condition. A synthetic two-channel overlap
-case checks pole/damping recovery independently. Test several seed sets and
-withhold frequencies to assess model error. Convergence is not completeness or
+case checks pole/damping recovery independently; the extended suite also tests
+responses of the entire 85-node network with four sources and all scan nodes.
+Output NPZ stores complex `background_coefficients[order+1,channels]`,
+`background_center_mhz` and `background_scale_mhz`; evaluate the polynomial at
+`(frequency_mhz-center)/scale`. Test several seed sets and withhold frequencies
+to assess model error. Convergence is not completeness or
 identifiability; residues still need calibrated spatial factorization before
 becoming the real orthonormal vectors required below.
 

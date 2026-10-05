@@ -25,7 +25,12 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/geometric-electricity-mpl")
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, signal
-from scipy.optimize import least_squares, linear_sum_assignment, minimize
+from scipy.optimize import (
+    least_squares,
+    linear_sum_assignment,
+    minimize,
+    minimize_scalar,
+)
 from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -463,6 +468,855 @@ def simulate(gs: list[dict[str, Any]], trials: int) -> dict[str, Any]:
     plt.close(fig)
     write_json(OUT / "simulation.json", summary)
     return summary
+
+
+def network_admittance(
+    g: dict[str, Any],
+    hz: float,
+    *,
+    quality: float = 36,
+    inductance: FloatArray | None = None,
+    srf_mhz: float | None = None,
+    cap_esr: float = 0,
+    cap_esl_nh: float = 0,
+    trace_nh: float = 0,
+    ground_nh: float = 0,
+    stray_pf: float | FloatArray = 2,
+    mutual: tuple[int, int, float] | None = None,
+) -> NDArray[np.complex128]:
+    """Passive lumped sensitivity model, not field-extracted PCB parasitics."""
+    li = np.full(85, L) if inductance is None else inductance
+    w = 2 * np.pi * hz
+    branches = np.diag(
+        2 * np.pi * 8e6 * L / quality + 1j * w * (li + ground_nh * 1e-9)
+    ).astype(complex)
+    if mutual is not None:
+        a, b, k = mutual
+        branches[a, b] = branches[b, a] = 1j * w * k * np.sqrt(li[a] * li[b])
+    y = linalg.inv(branches)
+    shunt = np.broadcast_to(np.asarray(stray_pf), (85,)) * 1e-12
+    if srf_mhz is not None:
+        shunt = shunt + 1 / ((2 * np.pi * srf_mhz * 1e6) ** 2 * li)
+    yc = 1 / (cap_esr + 1j * w * (cap_esl_nh + trace_nh) * 1e-9 + 1 / (1j * w * C))
+    for a, b in g["edges"]:
+        y[a, a] += yc
+        y[b, b] += yc
+        y[a, b] -= yc
+        y[b, a] -= yc
+    y[np.diag_indices(85)] += 1j * w * shunt + yc * np.array(g["missing"])
+    return y
+
+
+def source_visibility(
+    g: dict[str, Any], modes: FloatArray, clusters: list[list[int]]
+) -> dict[str, Any]:
+    """A degenerate cluster needs independent sources, not merely a visible peak."""
+    result = {}
+    for label, sources in [("center_only", [0]), ("four_selected", g["sources"])]:
+        entries = []
+        for cluster in clusters:
+            singular = linalg.svdvals(modes[np.ix_(sources, cluster)])
+            rank = int(np.sum(singular > 1e-8))
+            entries.append(
+                {
+                    "multiplicity": len(cluster),
+                    "source_rank": rank,
+                    "full_rank": rank == len(cluster),
+                    "minimum_source_singular_value": (
+                        float(singular[-1]) if rank == len(cluster) else 0.0
+                    ),
+                }
+            )
+        result[label] = {
+            "first6_clusters_full_rank": all(e["full_rank"] for e in entries[:6]),
+            "full_rank_clusters": sum(e["full_rank"] for e in entries),
+            "clusters": entries,
+        }
+    return result
+
+
+def noise_deembedding(g: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
+    """Simulate separate diagonal captures, the scan and calibration uncertainty."""
+    source = g["sources"][1]
+    noise = np.random.default_rng(20261006 + ord(g["name"]))
+    records = []
+    exact_error = 0.0
+    for hz in [3e6, 4.5e6, 6e6, 8e6, 10e6, 15e6]:
+        z = linalg.inv(network_admittance(g, hz))
+        yp = 1 / 10e6 + 2j * np.pi * hz * 10e-12
+        diagonal = np.diag(z)
+        loaded = z[:, source] / (1 + yp * diagonal)
+        recovered = loaded * (1 + yp * diagonal)
+        exact_error = max(
+            exact_error,
+            float(
+                np.linalg.norm(recovered - z[:, source]) / np.linalg.norm(z[:, source])
+            ),
+        )
+        vs = z[source, source] - yp * z[source, :] * z[:, source] / (1 + yp * diagonal)
+        # Z here has no source probe. Add that shunt and the generator/sense load.
+        current = 0.1 / (1050 + vs + 1050 * yp * vs)
+        source_v, scan_v = current * vs, current * loaded
+        pre_v = source_v + 1000 * current * (1 + yp * vs)
+        diagonal_i = 0.1 / (1050 + diagonal + 1050 * yp * diagonal)
+        diagonal_v = diagonal_i * diagonal
+        diagonal_pre = diagonal_v + 1000 * diagonal_i * (1 + yp * diagonal)
+        for sample_noise_uv, gain_error, phase_deg, cp_error in [
+            (0, 0, 0, 0),
+            (100, 0, 0, 0),
+            (500, 0, 0, 0),
+            (2000, 0, 0, 0),
+            (100, 0.005, 0.5, 2),
+        ]:
+            errors = []
+            for _ in range(40):
+                # Twenty-cycle, 1 GS/s acquisition. White sample noise is a sensitivity
+                # parameter, not a claim about the Rigol. I/Q fitting averages samples.
+                samples = int(20 * 1e9 / hz)
+                sigma = sample_noise_uv * 1e-6 * np.sqrt(2 / samples)
+                gain = (1 + noise.normal(0, gain_error, 3)) * np.exp(
+                    1j * np.deg2rad(noise.normal(0, phase_deg, 3))
+                )
+
+                def capture(
+                    values: NDArray[np.complex128],
+                    channel: int,
+                    gains: NDArray[np.complex128] = gain,
+                    deviation: float = float(sigma),
+                ) -> NDArray[np.complex128]:
+                    return values * gains[channel] + deviation * (
+                        noise.normal(size=85) + 1j * noise.normal(size=85)
+                    )
+
+                vin, vsource, vscan = (
+                    capture(pre_v, 0),
+                    capture(source_v, 1),
+                    capture(scan_v, 2),
+                )
+                assumed_y = (
+                    1 / 10e6
+                    + 2j * np.pi * hz * (10 + noise.normal(0, cp_error)) * 1e-12
+                )
+                inferred_i = (vin - vsource) / 1000 - assumed_y * vsource
+                diagonal_capture = capture(diagonal_v, 1)
+                zi = diagonal_capture / (
+                    (capture(diagonal_pre, 0) - diagonal_capture) / 1000
+                    - assumed_y * diagonal_capture
+                )
+                transfer = vscan / inferred_i * (1 + assumed_y * zi)
+                errors.append(
+                    float(
+                        np.linalg.norm(transfer - z[:, source])
+                        / np.linalg.norm(z[:, source])
+                    )
+                )
+            records.append(
+                {
+                    "frequency_mhz": hz / 1e6,
+                    "white_sample_noise_uv_rms": sample_noise_uv,
+                    "channel_gain_sigma": gain_error,
+                    "channel_phase_sigma_deg": phase_deg,
+                    "probe_capacitance_sigma_pf": cp_error,
+                    "transfer_relative_error_p95": float(np.quantile(errors, 0.95)),
+                    "scan_nodes_above_10sigma_phasor": int(
+                        np.sum(
+                            abs(scan_v)
+                            > 10
+                            * max(
+                                sample_noise_uv
+                                * 1e-6
+                                * np.sqrt(2 / int(20 * 1e9 / hz)),
+                                1e-15,
+                            )
+                        )
+                    ),
+                    "deembedding_gain_max": float(np.max(abs(1 + yp * diagonal))),
+                }
+            )
+    assert exact_error < 1e-12
+    return records, exact_error
+
+
+def derived_validation(
+    g: dict[str, Any], q: FloatArray, v: FloatArray
+) -> dict[str, Any]:
+    """Independent matrix functions, partial-tail coverage and kernel errors."""
+    operator = capacitance(g) / C
+    green = (v / q) @ v.T
+    error = float(np.linalg.norm(green - linalg.inv(operator)) / np.linalg.norm(green))
+    kernel_error = max(
+        float(
+            np.linalg.norm(
+                (v * np.exp(-time * q)) @ v.T - linalg.expm(-time * operator)
+            )
+        )
+        for time in [0.01, 0.1, 1, 10]
+    )
+    assert error < 1e-10 and kernel_error < 1e-10
+    entries = []
+    for count in [1, 6, 12, 24, 42, 85]:
+        partial_green = (v[:, :count] / q[:count]) @ v[:, :count].T
+        for time in [0.1, 1, 5, 10]:
+            trace = np.exp(-time * q).sum()
+            partial = np.exp(-time * q[:count]).sum()
+            bound = (85 - count) * np.exp(-time * q[count - 1])
+            assert partial <= trace + 1e-12 and trace <= partial + bound + 1e-12
+            entries.append(
+                {
+                    "modes": count,
+                    "time": time,
+                    "heat_trace_captured_fraction": float(partial / trace),
+                    "heat_tail_bound": float(bound),
+                    "green_relative_frobenius_error": float(
+                        np.linalg.norm(green - partial_green) / np.linalg.norm(green)
+                    ),
+                    "zeta_captured_fraction_s123": [
+                        float(np.sum(q[:count] ** (-s)) / np.sum(q ** (-s)))
+                        for s in [1.0, 2.0, 3.0]
+                    ],
+                }
+            )
+    return {
+        "inverse_relative_error": error,
+        "expm_absolute_error": kernel_error,
+        "partial_spectra": entries,
+    }
+
+
+def localization_stress(g: dict[str, Any], trials: int) -> list[dict[str, Any]]:
+    freq, modes = eigenpairs(capacitance(g), np.full(85, L))
+    clusters = groups(freq)[:6]
+    result = []
+    for lt, ct, correlation in [
+        (0.1, 0.05, 0),
+        (0.05, 0.05, 0),
+        (0.2, 0.05, 0),
+        (0.2, 0.1, 0),
+        (0.4, 0.1, 0),
+        (0.1, 0.05, 0.1),
+    ]:
+        rng = np.random.default_rng(20261007 + ord(g["name"]))
+        overlap, shift, participation = [], [], []
+        for _ in range(trials):
+            li = (
+                L
+                * (1 + rng.uniform(-lt, lt, 85))
+                * (1 + rng.uniform(-correlation, correlation))
+            )
+            edge = C * (1 + rng.uniform(-ct, ct, len(g["edges"])))
+            # Sample individual boundary capacitors; their bank average differs from
+            # fully correlated bank variation in the original conservative sweep.
+            bank = np.array(
+                [np.sum(1 + rng.uniform(-ct, ct, n)) * C for n in g["missing"]]
+            )
+            f, volts = eigenpairs(capacitance(g, edge, bank, 2), li)
+            transformed = volts / np.sqrt(li[:, None])
+            transformed /= np.linalg.norm(transformed, axis=0)
+            a, b = linear_sum_assignment(-abs(modes.T @ transformed) ** 2)
+            mapping = dict(zip(a.tolist(), b.tolist()))
+            angle, pr = [], []
+            for cluster in clusters:
+                basis, _ = np.linalg.qr(transformed[:, [mapping[i] for i in cluster]])
+                angle.append(
+                    float(linalg.svdvals(modes[:, cluster].T @ basis).min() ** 2)
+                )
+                density = np.sum(basis**2, axis=1) / len(cluster)
+                pr.append(float(1 / np.sum(density**2)))
+            overlap.append(min(angle))
+            participation.append(pr)
+            shift.append(float(np.max(abs(f[:12] / freq[:12] - 1))))
+        result.append(
+            {
+                "L_tolerance": lt,
+                "C_tolerance": ct,
+                "common_L_lot_tolerance": correlation,
+                "first6_self_adjoint_subspace_overlap_p05": float(
+                    np.quantile(overlap, 0.05)
+                ),
+                "first12_sorted_frequency_shift_p95": float(np.quantile(shift, 0.95)),
+                "cluster_density_participation_p05": np.quantile(
+                    participation, 0.05, axis=0
+                ).tolist(),
+            }
+        )
+    return result
+
+
+def loaded_pulse(
+    g: dict[str, Any], source: int, scan: int, sigma_ns: float, time: FloatArray
+) -> tuple[FloatArray, FloatArray]:
+    """Independent continuous-time state model including both probes and source load."""
+    cm = capacitance(g, stray_pf=2)
+    conductance = np.zeros(85)
+    for node in [source, scan]:
+        cm[node, node] += 10e-12
+        conductance[node] += 1 / 10e6
+    conductance[source] += 1 / 1050
+    ci = linalg.inv(cm)
+    resistance = 2 * np.pi * 8e6 * L / 36
+    a = np.block(
+        [
+            [-ci * conductance[None, :], -ci],
+            [np.eye(85) / L, -np.eye(85) * resistance / L],
+        ]
+    )
+    b = np.zeros((170, 1))
+    b[:85, 0] = ci[:, source] / 1050
+    c = np.eye(170)
+    drive = 0.1 * np.exp(-0.5 * ((time - 0.5e-6) / (sigma_ns * 1e-9)) ** 2)
+    _, states, _ = signal.lsim((a, b, c, np.zeros((170, 1))), drive, time)
+    return states[:, :85], states[:, 85:]
+
+
+def pulse_tests(g: dict[str, Any]) -> dict[str, Any]:
+    name = g["name"]
+    time = np.arange(0, 6e-6, 2e-9, dtype=np.float64)
+    source, scan = g["sources"][2], g["sources"][1]
+    # Match the separately stamped ngspice waveform, whose center is 0.3 us.
+    shifted_time = np.arange(0, 6e-6, 2e-9, dtype=np.float64)
+    wave, _ = loaded_pulse(g, source, scan, 30, shifted_time)
+    spice = np.load(OUT / f"{name}_loaded_pulse.npz")
+    aligned = np.column_stack(
+        [
+            np.interp(time - 0.2e-6, spice["time_s"], spice["voltage_v"][:, i], left=0)
+            for i in range(85)
+        ]
+    )
+    error = float(np.max(abs(wave - aligned)) / np.max(abs(wave)))
+    assert error < 0.01, error
+    points = [complex(*z) for z in g["metric_xy"]]
+    records = []
+    waves = []
+    for src in [source, g["sources"][3]]:
+        distance = np.array(
+            [
+                abs(z - points[src]) if name == "E" else hyperdistance(z, points[src])
+                for z in points
+            ]
+        )
+        for width in [30.0, 80.0, 150.0]:
+            signal_wave, currents = loaded_pulse(g, src, scan, width, time)
+            voltage_weight = signal_wave**2
+            spreading = np.sqrt(
+                (voltage_weight @ distance**2)
+                / np.maximum(voltage_weight.sum(axis=1), 1e-30)
+            )
+            # Include edge, boundary, stray and both active probe capacitances.
+            energy_capacitance = capacitance(g, stray_pf=2)
+            for probe_node in [src, scan]:
+                energy_capacitance[probe_node, probe_node] += 10e-12
+            energy = 0.5 * L * np.sum(currents**2, axis=1) + 0.5 * np.einsum(
+                "ti,ij,tj->t", signal_wave, energy_capacitance, signal_wave
+            )
+            env = abs(signal.hilbert(signal_wave, axis=0))
+            threshold = np.maximum(0.2 * env.max(axis=0), 0.0005)
+            above = (env > threshold[None, :]) & (time[:, None] >= 0.5e-6)
+            first = np.argmax(above, axis=0)
+            seen = above.any(axis=0)
+            arrival = np.where(seen, time[first], np.nan)
+            records.append(
+                {
+                    "source": src,
+                    "pulse_sigma_ns": width,
+                    "nodes_above_0_5mv_envelope": int(np.sum(seen)),
+                    "peak_voltage_v": float(np.max(abs(signal_wave))),
+                    "voltage_weighted_metric_radius_at_1us": float(
+                        spreading[np.searchsorted(time, 1e-6)]
+                    ),
+                    "peak_electrical_energy_j": float(energy.max()),
+                    "threshold_arrival_us": [
+                        float(x * 1e6) if np.isfinite(x) else None for x in arrival
+                    ],
+                }
+            )
+            waves.append(signal_wave)
+    # Physically scanned data changes the scan-probe position on every acquisition.
+    fixed = waves[0]
+    scanned = np.zeros_like(fixed)
+    for node in range(85):
+        moved, _ = loaded_pulse(g, source, node, 30, time)
+        scanned[:, node] = moved[:, node]
+    scan_error = float(np.linalg.norm(scanned - fixed) / np.linalg.norm(fixed))
+    np.savez_compressed(
+        OUT / f"{name}_pulse_tests.npz",
+        time_s=time,
+        fixed_probe_voltage_v=fixed,
+        moving_probe_voltage_v=scanned,
+        source=source,
+        scan=scan,
+    )
+    return {
+        "independent_ngspice_peak_error": error,
+        "moving_probe_relative_waveform_change": scan_error,
+        "cases": records,
+        "note": "Threshold arrivals and voltage-weighted radius are descriptive finite-disk observables, not causal speeds or an unreflected continuum geodesic front.",
+    }
+
+
+def pole_recovery_tests(
+    g: dict[str, Any], include_neighbor: bool = False, quality: float = 36
+) -> list[dict[str, Any]]:
+    """Exercise actual-network responses, held-out frequencies and spatial residues."""
+    cm = capacitance(g, stray_pf=2)
+    cv, v = linalg.eigh(cm)
+    undamped = 1 / (2 * np.pi * np.sqrt(L * cv))
+    clusters = groups(undamped)
+    chosen = clusters[4:7] if include_neighbor else clusters[4:6]
+    lower = min(float(undamped[c].mean()) for c in chosen)
+    upper = max(float(undamped[c].mean()) for c in chosen)
+    hz = np.linspace(lower - 0.04e6, upper + 0.04e6, 181)
+    resistance = 2 * np.pi * 8e6 * L / quality
+    # Full current-normalized response matrix for the selected four sources.
+    impedance = np.array(
+        [
+            (v * (1 / (2j * np.pi * f * cv + 1 / (resistance + 2j * np.pi * f * L))))
+            @ v[g["sources"], :].T
+            for f in hz
+        ]
+    )
+    expected = np.sort(
+        [
+            np.sqrt(
+                float(undamped[c].mean()) ** 2 - (resistance / (4 * np.pi * L)) ** 2
+            )
+            for c in chosen
+        ]
+    )
+    reports = []
+    rng = np.random.default_rng(20261008 + ord(g["name"]))
+    # A limited fit uses a smooth background for all out-of-window modes: residuals
+    # and withheld points expose this approximation even with zero measurement noise.
+    for relative_noise in [0.0, 0.001, 0.01, 0.05]:
+        scale = float(np.sqrt(np.mean(abs(impedance) ** 2)))
+        data = impedance + relative_noise * scale * (
+            rng.normal(size=impedance.shape) + 1j * rng.normal(size=impedance.shape)
+        ) / np.sqrt(2)
+        train = np.arange(len(hz)) % 4 != 0
+        path = OUT / f'{g["name"]}_recovery_input.npz'
+        np.savez_compressed(
+            path,
+            frequency_hz=hz[train],
+            impedance_ohm=data[train].reshape(np.sum(train), -1),
+        )
+        outcomes = []
+        for perturb in [-0.02, 0.02]:
+            output = OUT / f'{g["name"]}_recovery_fit.npz'
+            fitted = fit_poles(path, (expected / 1e6 + perturb).tolist(), output)
+            saved = np.load(output)
+            freq = saved["frequency_hz"]
+            gamma = saved["damping_hz"]
+            residue = saved["residue_ohm_per_s"]
+            s = 2j * np.pi * hz[:, None, None]
+            poles = 2 * np.pi * (-gamma + 1j * freq)
+            prediction = np.sum(
+                residue[None] / (s - poles[None, :, None])
+                + residue.conj()[None] / (s - poles.conj()[None, :, None]),
+                axis=1,
+            )
+            background = saved["background_coefficients"]
+            local_hz = (hz / 1e6 - float(saved["background_center_mhz"])) / float(
+                saved["background_scale_mhz"]
+            )
+            prediction += (
+                np.column_stack([local_hz**power for power in range(len(background))])
+                @ background
+            )
+            holdout = float(
+                np.linalg.norm(
+                    prediction[~train] - data[~train].reshape(np.sum(~train), -1)
+                )
+                / np.linalg.norm(data[~train])
+            )
+            spatial = []
+            for index in range(len(chosen)):
+                cluster = chosen[-1 - index]
+                matrix = residue[index].reshape(85, len(g["sources"]))
+                basis, _, _ = linalg.svd(
+                    np.column_stack([matrix.real, matrix.imag]), full_matrices=False
+                )
+                spatial.append(
+                    float(
+                        linalg.svdvals(v[:, cluster].T @ basis[:, : len(cluster)]).min()
+                        ** 2
+                    )
+                )
+            outcomes.append(
+                {
+                    **fitted,
+                    "heldout_relative_rms": holdout,
+                    "frequency_relative_error_max": float(
+                        np.max(abs(freq / expected - 1))
+                    ),
+                    "spatial_cluster_subspace_overlap_min": min(spatial),
+                    "seed_offset_mhz": perturb,
+                }
+            )
+        reports.append(
+            {
+                "relative_complex_noise_rms": relative_noise,
+                "Q_at_8mhz": quality,
+                "fitted_clusters": len(chosen),
+                "frequency_window_mhz": [float(hz.min() / 1e6), float(hz.max() / 1e6)],
+                "expected_damped_frequency_hz": expected.tolist(),
+                "fits": outcomes,
+            }
+        )
+    return reports
+
+
+def nonideal_spice_check(g: dict[str, Any]) -> float:
+    """Independently stamp ESR/ESL/SRF and mutual coupling in ngspice."""
+    name = g["name"]
+    source, scan = g["sources"][1:3]
+    pair = tuple(g["edges"][0])
+    r = 2 * np.pi * 8e6 * L / 36
+    lines = [
+        f"* {name}: nonideal independent branch stamps",
+        "Vsource vin 0 AC 1",
+        "Rgen vin pre 50",
+        f"Rin pre n{source} 1000",
+    ]
+    for i in range(85):
+        lines.extend(
+            [
+                f"LI{i} n{i} lr{i} {L}",
+                f"LG{i} lr{i} rr{i} 10n",
+                f"RI{i} rr{i} 0 {r}",
+                f"CSRF{i} n{i} 0 {1/((2*np.pi*95e6)**2*L)}",
+                f"CSTRAY{i} n{i} 0 2p",
+            ]
+        )
+        for j in range(g["missing"][i]):
+            suffix = f"B{i}_{j}"
+            lines.extend(
+                [
+                    f"R{suffix} n{i} b{suffix} .2",
+                    f"L{suffix} b{suffix} c{suffix} 21n",
+                    f"C{suffix} c{suffix} 0 330p",
+                ]
+            )
+    lines.append(f"KPAIR LI{pair[0]} LI{pair[1]} .1")
+    for k, (a, b) in enumerate(g["edges"]):
+        lines.extend(
+            [f"RE{k} n{a} re{k} .2", f"LE{k} re{k} ce{k} 21n", f"CE{k} ce{k} n{b} 330p"]
+        )
+    for tag, node in [("s", source), ("m", scan)]:
+        lines.extend([f"CP{tag} n{node} 0 10p", f"RP{tag} n{node} 0 10meg"])
+    output = OUT / f"{name}_nonideal_spice.txt"
+    deck = OUT / f"{name}_nonideal_spice.cir"
+    lines.extend(
+        [
+            ".control",
+            "set wr_singlescale",
+            "set wr_vecnames",
+            "ac lin 41 2meg 17meg",
+            f"wrdata {output} v(n{source}) v(n{scan})",
+            "quit",
+            ".endc",
+            ".end",
+        ]
+    )
+    deck.write_text("\n".join(lines) + "\n")
+    subprocess.run(["ngspice", "-b", str(deck)], check=True, capture_output=True)
+    data = np.loadtxt(output, skiprows=1)
+    actual = data[:, 1::2] + 1j * data[:, 2::2]
+    expected = []
+    for hz in data[:, 0]:
+        y = network_admittance(
+            g,
+            hz,
+            srf_mhz=95,
+            cap_esr=0.2,
+            cap_esl_nh=1,
+            trace_nh=20,
+            ground_nh=10,
+            mutual=(*pair, 0.1),
+        )
+        yp = 1 / 10e6 + 2j * np.pi * hz * 10e-12
+        y[source, source] += yp + 1 / 1050
+        y[scan, scan] += yp
+        drive = np.zeros(85, dtype=complex)
+        drive[source] = 1 / 1050
+        expected.append(linalg.solve(y, drive)[[source, scan]])
+    error = float(np.linalg.norm(actual - np.array(expected)) / np.linalg.norm(actual))
+    assert error < 1e-6, error
+    return error
+
+
+def fault_tests(g: dict[str, Any]) -> list[dict[str, Any]]:
+    """Response signatures of reversible defects and representative assembly faults."""
+    _, v = eigenpairs(capacitance(g), np.full(85, L))
+    selected = select_defects(g, v)
+    sources = g["sources"]
+    sweep = np.linspace(2e6, 17e6, 121)
+    results = []
+    cases = [(f"edge_{index}_open", ("edge", index, 0.0)) for index in selected]
+    cases += [
+        (f"edge_{selected[0]}_short_1ohm", ("short", selected[0], 0.0)),
+        ("boundary_one_cap_removed", ("boundary", sources[2], 0.0)),
+        ("inductor_source_open", ("inductor_open", sources[1], 0.0)),
+        ("inductor_source_short_1ohm", ("inductor_short", sources[1], 0.0)),
+    ]
+    baseline = []
+    for hz in sweep:
+        z = linalg.inv(network_admittance(g, float(hz)))
+        baseline.append(z)
+    for label, (kind, index, _) in cases:
+        signatures = []
+        for src in sources:
+            original = []
+            changed = []
+            for hz, z in zip(sweep, baseline):
+                y = network_admittance(g, float(hz))
+                w = 2 * np.pi * hz
+                if kind in ["edge", "short"]:
+                    a, b = g["edges"][index]
+                    delta = -1j * w * C + (1.0 if kind == "short" else 0.0)
+                    y[a, a] += delta
+                    y[b, b] += delta
+                    y[a, b] -= delta
+                    y[b, a] -= delta
+                elif kind == "boundary":
+                    y[index, index] -= 1j * w * C
+                else:
+                    y[index, index] -= 1 / (2 * np.pi * 8e6 * L / 36 + 1j * w * L)
+                    y[index, index] += 1.0 if kind == "inductor_short" else 0.0
+                zs = z[:, src]
+                zc = linalg.solve(y, np.eye(85)[:, src])
+                # Two 10 pF probes: source and one common boundary monitor.
+                monitor = sources[2]
+                yp = 1 / 10e6 + 1j * w * 10e-12
+
+                def source_loaded_column(
+                    matrix: NDArray[np.complex128],
+                    column: NDArray[np.complex128],
+                    probe_y: complex = yp,
+                    monitor_node: int = monitor,
+                    source_node: int = src,
+                ) -> NDArray[np.complex128]:
+                    scanloaded = column - probe_y * matrix[:, monitor_node] * column[
+                        monitor_node
+                    ] / (1 + probe_y * matrix[monitor_node, monitor_node])
+                    return (
+                        0.1
+                        * scanloaded
+                        / (1050 + (1 + 1050 * probe_y) * scanloaded[source_node])
+                    )
+
+                original.append(source_loaded_column(z, zs)[[src, monitor]])
+                zchange = linalg.inv(y)
+                changed.append(source_loaded_column(zchange, zc)[[src, monitor]])
+            old = np.array(original)
+            new = np.array(changed)
+            difference = new - old
+            signatures.append(
+                {
+                    "source": src,
+                    "two_channel_relative_response_change": float(
+                        np.linalg.norm(difference) / np.linalg.norm(old)
+                    ),
+                    "largest_voltage_change_mv": float(np.max(abs(difference)) * 1000),
+                }
+            )
+        results.append({"fault": label, "signatures": signatures})
+    return results
+
+
+def simulation_tests(gs: list[dict[str, Any]], trials: int) -> dict[str, Any]:
+    """Complete the design's computational measurement tests without altering CAD."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    report: dict[str, Any] = {
+        "seed": 20261006,
+        "trials": trials,
+        "geometries": {},
+        "assumptions": "Noise/calibration/ESR/ESL/trace/mutual values are sensitivity parameters, not measured equipment or extracted PCB models.",
+    }
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    for row, g in enumerate(gs):
+        print(
+            f"{g['name']}: visibility, parasitics and measurement reconstruction",
+            flush=True,
+        )
+        freq, modes = eigenpairs(capacitance(g), np.full(85, L))
+        q = 1 / ((2 * np.pi * freq) ** 2 * L * C)
+        source = g["sources"][1]
+        scan = g["sources"][2]
+        sweep = np.linspace(2e6, 17e6, 301, dtype=np.float64)
+        pair = tuple(g["edges"][0])
+        cases: list[tuple[str, dict[str, Any]]] = [
+            ("reference", {}),
+            ("SRF95", {"srf_mhz": 95}),
+            ("TDK_SRF120", {"srf_mhz": 120}),
+            ("FH_Q28_SRF75", {"quality": 28, "srf_mhz": 75}),
+            ("SRF50", {"srf_mhz": 50}),
+            ("Q20", {"quality": 20, "srf_mhz": 50}),
+            ("Q10", {"quality": 10, "srf_mhz": 35}),
+            (
+                "ESR_ESL_trace",
+                {
+                    "srf_mhz": 95,
+                    "cap_esr": 0.2,
+                    "cap_esl_nh": 1.0,
+                    "trace_nh": 20.0,
+                    "ground_nh": 10.0,
+                },
+            ),
+            ("mutual_positive", {"mutual": (*pair, 0.1)}),
+            ("mutual_negative", {"mutual": (*pair, -0.1)}),
+            (
+                "uneven_stray",
+                {"stray_pf": np.random.default_rng(44 + row).uniform(0, 10, 85)},
+            ),
+        ]
+        responses = []
+        parasitics = []
+        for label, kwargs in cases:
+            voltages = []
+            for hz in sweep:
+                y = network_admittance(g, float(hz), **kwargs)
+                assert np.linalg.eigvalsh(y.real).min() > -1e-9
+                yp = 1 / 10e6 + 2j * np.pi * hz * 10e-12
+                y[source, source] += yp + 1 / 1050
+                y[scan, scan] += yp
+                current = np.zeros(85, dtype=complex)
+                current[source] = 1 / 1050
+                voltages.append(linalg.solve(y, current))
+            response_v = np.array(voltages)
+            responses.append(response_v)
+            baseline = responses[0]
+
+            def source_amplitude(
+                hz: float,
+                parameters: dict[str, Any] = kwargs,
+                geometry: dict[str, Any] = g,
+                source_node: int = source,
+                scan_node: int = scan,
+            ) -> float:
+                y = network_admittance(geometry, hz, **parameters)
+                probe_y = 1 / 10e6 + 2j * np.pi * hz * 10e-12
+                y[source_node, source_node] += probe_y + 1 / 1050
+                y[scan_node, scan_node] += probe_y
+                drive = np.zeros(85, dtype=complex)
+                drive[source_node] = 1 / 1050
+                return float(abs(linalg.solve(y, drive)[source_node]))
+
+            window_indices = np.flatnonzero(
+                (sweep >= freq[0] * 0.9) & (sweep <= freq[0] * 1.02)
+            )
+            best = int(
+                window_indices[np.argmax(abs(response_v[window_indices, source]))]
+            )
+            peak = minimize_scalar(
+                lambda hz: -source_amplitude(float(hz)),
+                bounds=(
+                    max(freq[0] * 0.9, sweep[best] - 50e3),
+                    min(freq[0] * 1.02, sweep[best] + 50e3),
+                ),
+                method="bounded",
+                options={"xatol": 100},
+            )
+            parasitics.append(
+                {
+                    "scenario": label,
+                    "highest_loaded_peak_mhz": float(peak.x / 1e6),
+                    "relative_response_rms_change": float(
+                        np.linalg.norm(response_v - baseline) / np.linalg.norm(baseline)
+                    ),
+                    "peak_source_v_per_generator_v": float(
+                        np.max(abs(response_v[:, source]))
+                    ),
+                    "peak_scan_v_per_generator_v": float(
+                        np.max(abs(response_v[:, scan]))
+                    ),
+                }
+            )
+            axes[row, 0].plot(sweep / 1e6, abs(response_v[:, source]), label=label)
+        expected = response(g, sweep, source, [source, scan], 10, 36)
+        baseline_error = float(
+            np.linalg.norm(responses[0] - expected) / np.linalg.norm(expected)
+        )
+        assert baseline_error < 1e-10
+        measurement, exact = noise_deembedding(g)
+        print(
+            f"{g['name']}: disorder, pole recovery and 85-node moving-probe pulses",
+            flush=True,
+        )
+        localization = localization_stress(g, trials)
+        fits = pole_recovery_tests(g, g["name"] == "H")
+        cheap_fits = pole_recovery_tests(g, g["name"] == "H", quality=20)
+        pulses = pulse_tests(g)
+        derivation = derived_validation(g, q, modes)
+        visibility = source_visibility(g, modes, groups(freq))
+        report["geometries"][g["name"]] = {
+            "source_visibility": visibility,
+            "parasitic_scenarios": parasitics,
+            "baseline_matrix_relative_error": baseline_error,
+            "nonideal_ngspice_relative_error": nonideal_spice_check(g),
+            "assembly_faults": fault_tests(g),
+            "exact_scan_deembedding_error": exact,
+            "measurement_noise": measurement,
+            "disorder_localization": localization,
+            "actual_network_pole_recovery": fits,
+            "Q20_pole_recovery": cheap_fits,
+            "pulses": pulses,
+            "finite_graph_functions": derivation,
+        }
+        np.savez_compressed(
+            OUT / f'{g["name"]}_nonideal_ac.npz',
+            frequency_hz=sweep,
+            scenarios=[label for label, _ in cases],
+            voltage_v=np.array(responses),
+        )
+        axes[row, 0].set(
+            title=f'{g["name"]}: nonideal source responses',
+            xlabel="MHz",
+            ylabel="V / V generator",
+        )
+        axes[row, 0].legend(fontsize=6)
+        for noise in [100, 500, 2000]:
+            subset = [
+                entry
+                for entry in measurement
+                if entry["white_sample_noise_uv_rms"] == noise
+                and entry["channel_gain_sigma"] == 0
+            ]
+            axes[row, 1].semilogy(
+                [e["frequency_mhz"] for e in subset],
+                [max(e["transfer_relative_error_p95"], 1e-12) for e in subset],
+                label=f"{noise} µV white sample noise",
+            )
+        axes[row, 1].set(
+            title="Noisy current reconstruction + scan deembedding",
+            xlabel="MHz",
+            ylabel="95% map relative error",
+        )
+        axes[row, 1].legend(fontsize=7)
+        for count in [6, 12, 24, 42]:
+            subset = [
+                entry
+                for entry in derivation["partial_spectra"]
+                if entry["modes"] == count
+            ]
+            axes[row, 2].plot(
+                [e["time"] for e in subset],
+                [e["heat_trace_captured_fraction"] for e in subset],
+                label=f"{count} modes",
+            )
+        axes[row, 2].set(
+            title="Finite heat trace recovered from low modes",
+            xlabel="dimensionless time",
+            ylabel="captured fraction",
+        )
+        axes[row, 2].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(OUT / "test_simulations.png", dpi=160)
+    plt.close(fig)
+    write_json(OUT / "test_simulations.json", report)
+    return report
 
 
 def components(gs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1252,7 +2106,7 @@ def budget(parts: list[dict[str, Any]]) -> dict[str, Any]:
         raise ValueError("BOM exceeds budgeted purchasing quantities")
     allocation = {
         "200_inductors": round(200 * 0.09380, 2),
-        "800_capacitors": 800 * 0.013,
+        "800_capacitors": round(800 * 0.0062, 2),
         "resistors_headers_spares": 5.0,
         "pcb_order_and_stencil_allowance": 70.0,
         "combined_shipping_allowance": 35.0,
@@ -1274,6 +2128,24 @@ def budget(parts: list[dict[str, Any]]) -> dict[str, Any]:
         "landed_quotes_confirmed": False,
         "purchase_release": False,
         "price_check_date": "2026-10-05",
+        "price_sources": {
+            "inductors": "https://www.digikey.com/en/products/detail/abracon-llc/AIML-0805-1R0K-T/2662996",
+            "capacitors": "https://www.lcsc.com/product-detail/C62784.html",
+        },
+        "preferred_substitution": {
+            "inductor_mpn": "MLF2012A1R0JT000",
+            "supplier_code": "C165812",
+            "price_source": "https://www.lcsc.com/fr/product-detail/C165812.html",
+            "quantity": 200,
+            "unit_usd": 0.0381,
+            "inductor_total_usd": 7.62,
+            "proposed_total_usd": round(total - allocation["200_inductors"] + 7.62, 2),
+            "part_savings_vs_original_allocation_usd": 16.58,
+            "L_tolerance": 0.05,
+            "Q_min_at_10mhz": 45,
+            "SRF_min_mhz": 120,
+            "status": "Recommended purchasing alternate; current CAD/BOM still name Abracon. Supplier stock/landed quote, final land-pattern review and RF sample qualification remain required.",
+        },
     }
     write_json(OUT / "budget.json", report)
     return report
@@ -1629,7 +2501,9 @@ def phasors(
     }
 
 
-def fit_poles(path: Path, initial_mhz: list[float], output: Path) -> dict[str, Any]:
+def fit_poles(
+    path: Path, initial_mhz: list[float], output: Path, background_order: int = 2
+) -> dict[str, Any]:
     """Variable-projection fit of common damped poles to calibrated complex responses."""
     data = np.load(path)
     hz = np.asarray(data["frequency_hz"], dtype=float)
@@ -1643,7 +2517,8 @@ def fit_poles(path: Path, initial_mhz: list[float], output: Path) -> dict[str, A
         hz.ndim != 1
         or measured.shape[0] != len(hz)
         or len(seeds) == 0
-        or len(hz) < 10 * len(seeds)
+        or len(hz)
+        < max(10 * len(seeds), 2 * (2 * len(seeds) + 2 * (background_order + 1)))
         or not np.all(np.diff(hz) > 0)
         or np.any(hz <= 0)
         or not np.all(np.diff(seeds) > 0)
@@ -1657,6 +2532,14 @@ def fit_poles(path: Path, initial_mhz: list[float], output: Path) -> dict[str, A
     if np.any(seeds < mhz.min()) or np.any(seeds > mhz.max()):
         raise ValueError("Pole seeds must be inside the measured band")
     count = len(seeds)
+    if background_order not in range(5):
+        raise ValueError("Background order must be between zero and four")
+    background_center = float(mhz.mean())
+    background_scale = float(np.ptp(mhz))
+    local_frequency = (mhz - background_center) / background_scale
+    polynomial = np.column_stack(
+        [local_frequency**power for power in range(background_order + 1)]
+    )
     if not np.any(abs(measured) > 0):
         raise ValueError("Response has zero amplitude")
     scale = np.maximum(
@@ -1675,8 +2558,8 @@ def fit_poles(path: Path, initial_mhz: list[float], output: Path) -> dict[str, A
             [
                 positive + negative,
                 1j * (positive - negative),
-                np.ones(len(mhz)),
-                1j * mhz,
+                polynomial,
+                1j * polynomial,
             ]
         )
         matrix = np.concatenate([basis.real, basis.imag], axis=0)
@@ -1721,10 +2604,16 @@ def fit_poles(path: Path, initial_mhz: list[float], output: Path) -> dict[str, A
         residue_ohm_per_s=residues,
         reconstructed_impedance_ohm=reconstruction,
         response_frequency_hz=hz,
-        background_coefficients=coefficients[-2:],
+        background_coefficients=coefficients[
+            2 * count : 2 * count + background_order + 1
+        ]
+        + 1j * coefficients[2 * count + background_order + 1 :],
+        background_center_mhz=background_center,
+        background_scale_mhz=background_scale,
     )
     report = {
         "converged": bool(fitted.success),
+        "background_order": background_order,
         "frequency_hz": frequencies.tolist(),
         "damping_hz": damping.tolist(),
         "undamped_frequency_hz": np.hypot(frequencies, damping).tolist(),
@@ -1733,7 +2622,7 @@ def fit_poles(path: Path, initial_mhz: list[float], output: Path) -> dict[str, A
             np.linalg.norm(reconstruction - measured) / np.linalg.norm(measured)
         ),
         "jacobian_condition": float(np.linalg.cond(fitted.jac)),
-        "note": "Calibrated common-pole data required; convergence does not prove completeness, identifiability or physical eigenvectors. Check multiple seeds and held-out frequencies.",
+        "note": "Conjugate pole pairs with a local complex polynomial background on the positive-frequency window; background is not a global passive network model. Calibrated common-pole data required; convergence does not prove completeness, identifiability or physical eigenvectors. Check multiple seeds, background orders and held-out frequencies.",
     }
     write_json(output.with_suffix(".json"), report)
     return report
@@ -1966,6 +2855,7 @@ def main() -> None:
         choices=[
             "build",
             "simulate",
+            "test-simulations",
             "check",
             "phasor",
             "derive",
@@ -1981,6 +2871,7 @@ def main() -> None:
     parser.add_argument("--eigenpairs", type=Path)
     parser.add_argument("--responses", type=Path)
     parser.add_argument("--initial-mhz", type=float, nargs="+")
+    parser.add_argument("--background-order", type=int, default=2)
     parser.add_argument("--waveforms", type=Path)
     parser.add_argument("--geometry", choices=["E", "H"], default="H")
     parser.add_argument("--output", type=Path, default=OUT / "analysis.npz")
@@ -2009,7 +2900,10 @@ def main() -> None:
             parser.error("--responses and --initial-mhz required")
         print(
             json.dumps(
-                fit_poles(args.responses, args.initial_mhz, args.output), indent=2
+                fit_poles(
+                    args.responses, args.initial_mhz, args.output, args.background_order
+                ),
+                indent=2,
             )
         )
         return
@@ -2044,6 +2938,11 @@ def main() -> None:
         parser.error("--trials must be positive")
     gs = graphs()
     selfcheck(gs)
+    if args.command == "test-simulations":
+        simulate(gs, args.trials)
+        spice_check(gs)
+        simulation_tests(gs, args.trials)
+        return
     if args.command in ["build", "simulate"]:
         summary = simulate(gs, args.trials)
         spice_check(gs)
